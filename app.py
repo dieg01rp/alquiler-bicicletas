@@ -19,7 +19,7 @@ import streamlit as st
 # CONFIGURACIÓN DE PÁGINA
 # ==============================================================================
 st.set_page_config(
-    page_title="Pronóstico Horario de Bicicletas - RNN",
+    page_title="Pronóstico Horario de Bicicletas",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -155,7 +155,6 @@ def predict_single(model, x_win, y_mean, y_std):
 # ==============================================================================
 with st.sidebar:
     st.subheader("Panel de Control")
-    st.caption("Sistemas Inteligentes y Machine Learning")
 
     st.markdown("---")
     idx_min, idx_max = SPLITS["test"][0], SPLITS["test"][1] - 1
