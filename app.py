@@ -8,50 +8,44 @@ Original file is located at
 """
 
 import os
-import json
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import streamlit as st
 
 # ==============================================================================
-# CONFIGURACIÓN DE PÁGINA Y ESTILOS
+# CONFIGURACIÓN DE PÁGINA
 # ==============================================================================
 st.set_page_config(
-    page_title="Pronóstico Horario de Bicicletas · RNN (Grupo 04)",
-    page_icon="🚲",
+    page_title="Pronóstico Horario de Bicicletas - RNN",
+    page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 st.markdown("""
 <style>
-    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+    .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
     div[data-testid="metric-container"] {
         background-color: #F8FAFC;
         border: 1px solid #E2E8F0;
-        padding: 12px 16px;
-        border-radius: 8px;
+        padding: 10px 14px;
+        border-radius: 6px;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# DEFINICIÓN DE LA ARQUITECTURA (IDÉNTICA AL NOTEBOOK)
+# ARQUITECTURA RNN
 # ==============================================================================
 class RNNRegressor(nn.Module):
     def __init__(self, n_features: int, hidden: int, layers: int = 1, dropout: float = 0.0):
         super().__init__()
         self.rnn = nn.RNN(
-            n_features,
-            hidden,
-            num_layers=layers,
-            nonlinearity="tanh",
-            batch_first=True,
-            dropout=dropout if layers > 1 else 0.0,
+            n_features, hidden, num_layers=layers, nonlinearity="tanh",
+            batch_first=True, dropout=dropout if layers > 1 else 0.0,
         )
         self.head = nn.Linear(hidden, 1)
 
@@ -59,9 +53,8 @@ class RNNRegressor(nn.Module):
         out, _ = self.rnn(x)
         return self.head(out[:, -1, :]).squeeze(-1)
 
-
 # ==============================================================================
-# CARGA DE ARTEFACTOS Y DATOS (CON CACHÉ)
+# CARGA DE ARTEFACTOS Y DATOS
 # ==============================================================================
 @st.cache_resource
 def load_model_and_meta(ckpt_path: str = "artefactos/rnn_bike_model.pt"):
@@ -69,18 +62,13 @@ def load_model_and_meta(ckpt_path: str = "artefactos/rnn_bike_model.pt"):
         return None
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     arch = ckpt["arquitectura"]
-    model = RNNRegressor(
-        n_features=arch["n_features"],
-        hidden=arch["hidden"],
-        layers=arch["layers"],
-    )
+    model = RNNRegressor(arch["n_features"], arch["hidden"], arch["layers"])
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     return ckpt, model
 
-
 @st.cache_data
-def load_series_and_csvs(csv_path: str = "hour.csv", ckpt_path: str = "artefactos/rnn_bike_model.pt"):
+def load_series_and_artifacts(csv_path: str = "hour.csv", ckpt_path: str = "artefactos/rnn_bike_model.pt"):
     if not os.path.exists(csv_path) or not os.path.exists(ckpt_path):
         return None
 
@@ -123,7 +111,6 @@ def load_series_and_csvs(csv_path: str = "hour.csv", ckpt_path: str = "artefacto
     S["y"] = df["cnt"].shift(-1)
     S = S.iloc[:-1].copy()
 
-    # Escalamiento con los parámetros exactos ajustados en train
     F = S[features].copy()
     F[scale_cols] = (F[scale_cols].values - mean) / scale
     F_arr = F.values.astype(np.float32)
@@ -131,63 +118,21 @@ def load_series_and_csvs(csv_path: str = "hour.csv", ckpt_path: str = "artefacto
     n = len(S)
     n_tr = int(n * 0.70)
     n_va = int(n * 0.15)
-    splits = {
-        "train": (0, n_tr),
-        "val": (n_tr, n_tr + n_va),
-        "test": (n_tr + n_va, n),
-    }
+    splits = {"train": (0, n_tr), "val": (n_tr, n_tr + n_va), "test": (n_tr + n_va, n)}
 
-    # Cargar tablas de resultados si existen
-    df_val = pd.read_csv("artefactos/resultados_validacion.csv") if os.path.exists("artefactos/resultados_validacion.csv") else None
     df_test = pd.read_csv("artefactos/resultados_test.csv", index_col=0) if os.path.exists("artefactos/resultados_test.csv") else None
     df_preds = pd.read_csv("artefactos/predicciones_test.csv", index_col=0, parse_dates=True) if os.path.exists("artefactos/predicciones_test.csv") else None
 
     return {
-        "df": df,
-        "S": S,
-        "F_arr": F_arr,
-        "mean": mean,
-        "scale": scale,
-        "splits": splits,
-        "df_val": df_val,
-        "df_test": df_test,
-        "df_preds": df_preds,
+        "df": df, "S": S, "F_arr": F_arr, "mean": mean, "scale": scale,
+        "splits": splits, "df_test": df_test, "df_preds": df_preds,
     }
 
-
-def predict_single(model: nn.Module, x_win: np.ndarray, y_mean: float, y_std: float) -> float:
-    with torch.no_grad():
-        xt = torch.from_numpy(x_win[None, :, :])  # (1, L, F)
-        y_sc = float(model(xt).item())
-    return max(y_sc * y_std + y_mean, 0.0)
-
-
-def check_weather_alert(df: pd.DataFrame, ts: pd.Timestamp):
-    w_now = df.loc[ts, ["temp", "hum", "windspeed"]]
-    w_prev = df.loc[ts - pd.Timedelta(hours=3), ["temp", "hum", "windspeed"]]
-    d = (w_now - w_prev).abs()
-    reasons = []
-    if d["temp"] > 0.08:
-        reasons.append(f"Δ temp = {d['temp']*41:.1f} °C ({d['temp']:.3f} norm.)")
-    if d["hum"] > 0.15:
-        reasons.append(f"Δ humedad = {d['hum']*100:.0f} % ({d['hum']:.3f} norm.)")
-    if d["windspeed"] > 0.15:
-        reasons.append(f"Δ viento = {d['windspeed']*67:.1f} km/h ({d['windspeed']:.3f} norm.)")
-    return len(reasons) > 0, reasons, w_now, d
-
-
-# ==============================================================================
-# VERIFICACIÓN DE ARCHIVOS NECESARIOS
-# ==============================================================================
 loaded_model = load_model_and_meta()
-data_bundle = load_series_and_csvs()
+data_bundle = load_series_and_artifacts()
 
 if loaded_model is None or data_bundle is None:
-    st.error("⚠️ No se encontraron los archivos requeridos (`artefactos/rnn_bike_model.pt` y/o `hour.csv`).")
-    st.info(
-        "Asegúrate de ejecutar primero el notebook `BikeSharing.ipynb` hasta la Etapa 16 para generar la carpeta "
-        "`./artefactos/` y coloca `hour.csv` en el mismo directorio que `app.py`."
-    )
+    st.error("Error: No se encontraron los archivos en la carpeta artefactos/ o el archivo hour.csv.")
     st.stop()
 
 ckpt, model = loaded_model
@@ -199,100 +144,61 @@ F_arr = data_bundle["F_arr"]
 Y_MEAN, Y_STD = float(data_bundle["mean"][0]), float(data_bundle["scale"][0])
 SPLITS = data_bundle["splits"]
 
+def predict_single(model, x_win, y_mean, y_std):
+    with torch.no_grad():
+        xt = torch.from_numpy(x_win[None, :, :])
+        y_sc = float(model(xt).item())
+    return max(y_sc * y_std + y_mean, 0.0)
+
 # ==============================================================================
-# BARRA LATERAL (SIDEBAR): CONTROLES Y FICHA TÉCNICA DEL MODELO
+# BARRA LATERAL
 # ==============================================================================
 with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/bicycle.png", width=56)
-    st.title("Panel de Control")
-    st.caption("Grupo 04 · Sistemas Inteligentes y ML")
+    st.subheader("Panel de Control")
+    st.caption("Sistemas Inteligentes y Machine Learning")
 
-    st.subheader("1. Selección de Instante (t)")
-    particion_filtro = st.selectbox(
-        "Partición cronológica",
-        options=["Test (Recomendado - Inédito)", "Validación", "Entrenamiento", "Toda la serie"],
-        index=0,
-    )
-
-    if particion_filtro.startswith("Test"):
-        idx_min, idx_max = SPLITS["test"][0], SPLITS["test"][1] - 1
-    elif particion_filtro == "Validación":
-        idx_min, idx_max = SPLITS["val"][0], SPLITS["val"][1] - 1
-    elif particion_filtro == "Entrenamiento":
-        idx_min, idx_max = max(L - 1, 48), SPLITS["train"][1] - 1
-    else:
-        idx_min, idx_max = max(L - 1, 48), len(S) - 1
-
+    st.markdown("---")
+    idx_min, idx_max = SPLITS["test"][0], SPLITS["test"][1] - 1
     ts_min, ts_max = S.index[idx_min], S.index[idx_max]
 
-    # Presets rápidos interesantes para la sustentación
-    preset = st.selectbox(
-        "Casos rápidos de prueba",
-        options=[
-            "Personalizado (elegir fecha/hora)",
-            "Caso 1: Cambio brusco de clima (2012-09-14 08:00)",
-            "Caso 2: Hora punta laboral (2012-10-10 16:00)",
-            "Caso 3: Fin de semana recreativo (2012-09-22 13:00)",
-            "Caso 4: Huracán Sandy / anomalía (2012-10-29 17:00)",
-        ],
-    )
+    fecha_sel = st.date_input("Fecha de evaluación (t)", value=ts_min.date(), min_value=ts_min.date(), max_value=ts_max.date())
+    hora_sel = st.slider("Hora del día (0-23 h)", 0, 23, 8)
 
-    if preset.startswith("Caso 1"):
-        default_dt = pd.Timestamp("2012-09-14 08:00:00")
-    elif preset.startswith("Caso 2"):
-        default_dt = pd.Timestamp("2012-10-10 16:00:00")
-    elif preset.startswith("Caso 3"):
-        default_dt = pd.Timestamp("2012-09-22 13:00:00")
-    elif preset.startswith("Caso 4"):
-        default_dt = pd.Timestamp("2012-10-29 17:00:00")
-    else:
-        default_dt = ts_min + pd.Timedelta(hours=24)
+    st.markdown("---")
+    horas_vista = st.radio("Ventana histórica visible", [24, 48, 72], index=1, horizontal=True)
+    mostrar_clima = st.checkbox("Mostrar variables meteorológicas", value=True)
+    mostrar_baselines = st.checkbox("Incluir líneas base en gráfico", value=True)
 
-    fecha_sel = st.date_input(
-        "Fecha del instante t",
-        value=default_dt.date(),
-        min_value=ts_min.date(),
-        max_value=ts_max.date(),
-    )
-    hora_sel = st.slider("Hora del día en t (0–23 h)", min_value=0, max_value=23, value=int(default_dt.hour))
-
-    st.subheader("2. Opciones de Visualización")
-    horas_vista = st.radio("Ventana histórica visible", options=[24, 48, 72], index=1, horizontal=True)
-    mostrar_clima_panel = st.checkbox("Mostrar variables meteorológicas", value=True)
-    mostrar_baselines = st.checkbox("Comparar con baselines en gráfico", value=True)
-
-    st.divider()
-    st.subheader("Ficha Técnica del Artefacto")
+    st.markdown("---")
     st.markdown(
         f"""
-        - **Arquitectura:** RNN Simple (`tanh`) + Lineal
-        - **Capas / Hidden:** `{arch['layers']}` capas × `{arch['hidden']}` unidades
-        - **Ventana ($L$):** `{L}` horas (`{arch['n_features']}` features)
-        - **Parámetros:** `{sum(p.numel() for p in model.parameters()):,}`
-        - **Semilla / PyTorch:** `{ckpt.get('semilla', 42)}` / `{ckpt.get('versiones', {}).get('torch', 'N/A')}`
+        **Especificaciones del Modelo:**
+        - Arquitectura: RNN Simple (`tanh`)
+        - Capas / Ocultas: {arch['layers']} capa(s) × {arch['hidden']} neuronas
+        - Ventana temporal ($L$): {arch['L']} horas
+        - Parámetros entrenables: {sum(p.numel() for p in model.parameters()):,}
         """
     )
 
 # ==============================================================================
-# ENCABEZADO PRINCIPAL Y PESTAÑAS
+# CUERPO PRINCIPAL
 # ==============================================================================
-st.title("🚲 Pronóstico Horario de Alquiler de Bicicletas mediante RNN Simple")
+st.title("Pronóstico Horario de Alquiler de Bicicletas mediante RNN")
 st.markdown(
-    "Sistema de apoyo operativo para anticipar la demanda en **$t+1$** (`cnt`) respetando estrictamente "
-    "el orden cronológico y sin fuga de información futura (*UCI Bike Sharing Dataset*, ID 275)."
+    "Modelo predictivo para el horizonte temporal $t+1$ (`cnt`) aplicando validación cronológica estricta "
+    "y control de fuga de información (*UCI Bike Sharing Dataset*, ID 275)."
 )
 
-tab_demo, tab_simulador, tab_metricas, tab_doc = st.tabs([
-    "🔮 Pronóstico Histórico (t+1)",
-    "🎛️ Simulador What-If (Clima y Escenarios)",
-    "📊 Benchmark y Error por Hora",
-    "📘 Documentación y Limitaciones",
+tab1, tab2, tab3 = st.tabs([
+    "Pronóstico y Evaluación (t+1)",
+    "Simulación Interactiva",
+    "Evaluación Experimental y Benchmark"
 ])
 
-# ==============================================================================
-# TAB 1: PRONÓSTICO HISTÓRICO Y AUDITORÍA DE VENTANA
-# ==============================================================================
-with tab_demo:
+# ------------------------------------------------------------------------------
+# PESTAÑA 1: PRONÓSTICO
+# ------------------------------------------------------------------------------
+with tab1:
     ts_sel = pd.Timestamp(fecha_sel) + pd.Timedelta(hours=hora_sel)
     if ts_sel < S.index[max(L - 1, horas_vista)]:
         ts_sel = S.index[max(L - 1, horas_vista)]
@@ -302,152 +208,78 @@ with tab_demo:
     t_idx = S.index.get_loc(ts_sel)
     part_actual = next((k.upper() for k, (a, b) in SPLITS.items() if a <= t_idx < b), "N/A")
 
-    # Inferencia RNN
     x_win = F_arr[t_idx - L + 1 : t_idx + 1]
     pred_rnn = predict_single(model, x_win, Y_MEAN, Y_STD)
     real_t1 = float(S["y"].iloc[t_idx])
     pers_t = float(S["cnt"].iloc[t_idx])
-    estacional_24h = float(df["cnt"].iloc[t_idx + 1 - 24]) if t_idx + 1 >= 24 else pers_t
+    est_24 = float(df["cnt"].iloc[t_idx + 1 - 24]) if t_idx + 1 >= 24 else pers_t
 
-    err_rnn = abs(real_t1 - pred_rnn)
-    err_pers = abs(real_t1 - pers_t)
-
-    # Banner informativo del instante evaluado
     st.info(
-        f"**Instante de decisión ($t$):** `{ts_sel.strftime('%Y-%m-%d %H:%M')}` ({ts_sel.strftime('%A')})  |  "
-        f"**Horizonte pronosticado ($t+1$):** `{(ts_sel + pd.Timedelta(hours=1)).strftime('%Y-%m-%d %H:%M')}`  |  "
-        f"**Partición:** `{part_actual}`"
+        f"Instante de decisión ($t$): {ts_sel.strftime('%Y-%m-%d %H:%M')} ({ts_sel.strftime('%A')})  |  "
+        f"Horizonte pronosticado ($t+1$): {(ts_sel + pd.Timedelta(hours=1)).strftime('%Y-%m-%d %H:%M')}  |  "
+        f"Partición: {part_actual}"
     )
 
-    # Alerta climática automática (últimas 3 horas)
-    alerta_clima, razones_clima, w_now, d_clima = check_weather_alert(df, ts_sel)
-    if alerta_clima:
-        st.warning(
-            "⚠️ **AVISO METEOROLÓGICO:** Se detectó un cambio brusco del clima en las últimas 3 horas "
-            f"({', '.join(reasons_clima)}). Dado que el modelo no conoce el pronóstico climático de $t+1$, "
-            "la predicción puede presentar mayor incertidumbre."
-        )
-    else:
-        st.success("✅ **Condiciones climáticas estables** en las últimas 3 horas previas al instante $t$.")
-
-    # Tarjetas KPI
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric(
-        label="Pronóstico RNN (t+1)",
-        value=f"{pred_rnn:.0f} bicis",
-        delta=f"{pred_rnn - pers_t:+.0f} vs. hora actual",
-    )
-    c2.metric(
-        label="Demanda Real (t+1)",
-        value=f"{real_t1:.0f} bicis",
-        delta=f"Error RNN: {err_rnn:.1f} bicis",
-        delta_color="inverse",
-    )
-    c3.metric(
-        label="Baseline Persistencia cnt(t)",
-        value=f"{pers_t:.0f} bicis",
-        delta=f"Error Pers.: {err_pers:.1f} bicis",
-        delta_color="inverse",
-    )
-    c4.metric(
-        label="Baseline Misma Hora Ayer",
-        value=f"{estacional_24h:.0f} bicis",
-        delta=f"Error Est.: {abs(real_t1 - estacional_24h):.1f} bicis",
-        delta_color="inverse",
-    )
+    c1.metric("Pronóstico RNN (t+1)", f"{pred_rnn:.0f} bicis", f"{pred_rnn - pers_t:+.0f} vs. actual")
+    c2.metric("Demanda Real (t+1)", f"{real_t1:.0f} bicis", f"Error RNN: {abs(real_t1 - pred_rnn):.1f}", delta_color="inverse")
+    c3.metric("Persistencia cnt(t)", f"{pers_t:.0f} bicis", f"Error Pers.: {abs(real_t1 - pers_t):.1f}", delta_color="inverse")
+    c4.metric("Misma Hora Día Anterior", f"{est_24:.0f} bicis", f"Error Est.: {abs(real_t1 - est_24):.1f}", delta_color="inverse")
 
-    # Recomendación operativa automática
-    diff_flota = pred_rnn - pers_t
-    if diff_flota > 60:
-        st.markdown(
-            f"🚚 **Acción operativa sugerida:** Se proyecta un **repunte fuerte de demanda (+{diff_flota:.0f} alquileres)**. "
-            "Priorizar reposición de bicicletas en estaciones origen/residenciales antes del cambio de hora."
-        )
-    elif diff_flota < -60:
-        st.markdown(
-            f"🅿️ **Acción operativa sugerida:** Se proyecta una **caída pronunciada de demanda ({diff_flota:.0f} alquileres)**. "
-            "Liberar anclajes en estaciones destino para evitar saturación de devoluciones."
-        )
-    else:
-        st.markdown(
-            "⚖️ **Acción operativa sugerida:** Demanda estable respecto a la hora actual; mantener monitoreo estándar."
-        )
-
-    # Gráfico principal
     ventana_df = df.iloc[t_idx - horas_vista + 1 : t_idx + 1]
     t1_ts = ts_sel + pd.Timedelta(hours=1)
 
-    n_rows_plot = 2 if mostrar_clima_panel else 1
     fig, axes = plt.subplots(
-        n_rows_plot,
-        1,
-        figsize=(12, 4.8 if mostrar_clima_panel else 3.6),
-        sharex=True,
-        gridspec_kw={"height_ratios": [2.4, 1]} if mostrar_clima_panel else None,
+        2 if mostrar_clima else 1, 1,
+        figsize=(12, 4.6 if mostrar_clima else 3.5), sharex=True,
+        gridspec_kw={"height_ratios": [2.4, 1]} if mostrar_clima else None
     )
-    ax0 = axes[0] if mostrar_clima_panel else axes
+    ax0 = axes[0] if mostrar_clima else axes
 
-    ax0.plot(ventana_df.index, ventana_df["cnt"], color="#1E293B", marker="o", markersize=3.5, lw=1.6, label=f"Observado hasta t (últimas {horas_vista} h)")
-    ax0.axvspan(ts_sel - pd.Timedelta(hours=L - 1), ts_sel, color="#DBEAFE", alpha=0.45, label=f"Ventana entrada RNN (L={L} h)")
-    ax0.scatter([t1_ts], [pred_rnn], color="#DC2626", s=110, zorder=6, label=f"Pronóstico RNN t+1 ({pred_rnn:.0f})")
-    ax0.scatter([t1_ts], [real_t1], color="#16A34A", marker="X", s=110, zorder=6, label=f"Real t+1 ({real_t1:.0f})")
+    ax0.plot(ventana_df.index, ventana_df["cnt"], color="#1E293B", marker="o", markersize=3, lw=1.5, label=f"Observado hasta t ({horas_vista} h)")
+    ax0.axvspan(ts_sel - pd.Timedelta(hours=L - 1), ts_sel, color="#DBEAFE", alpha=0.4, label=f"Ventana de entrada (L={L} h)")
+    ax0.scatter([t1_ts], [pred_rnn], color="#DC2626", s=100, zorder=6, label=f"Pronóstico RNN ({pred_rnn:.0f})")
+    ax0.scatter([t1_ts], [real_t1], color="#16A34A", marker="X", s=100, zorder=6, label=f"Real t+1 ({real_t1:.0f})")
 
     if mostrar_baselines:
-        ax0.scatter([t1_ts], [pers_t], color="#F59E0B", marker="^", s=85, zorder=5, label=f"Persistencia ({pers_t:.0f})")
-        ax0.scatter([t1_ts], [estacional_24h], color="#7C3AED", marker="s", s=75, zorder=5, label=f"Misma hora ayer ({estacional_24h:.0f})")
+        ax0.scatter([t1_ts], [pers_t], color="#F59E0B", marker="^", s=80, zorder=5, label=f"Persistencia ({pers_t:.0f})")
+        ax0.scatter([t1_ts], [est_24], color="#7C3AED", marker="s", s=70, zorder=5, label=f"Misma hora ayer ({est_24:.0f})")
 
     ax0.axvline(ts_sel, color="#64748B", linestyle="--", lw=1, alpha=0.8)
     ax0.set_ylabel("Alquileres (cnt)")
-    ax0.set_title(f"Trayectoria horaria y pronóstico para {t1_ts.strftime('%Y-%m-%d %H:%M')}")
+    ax0.set_title(f"Evolución horaria y predicción para el período {t1_ts.strftime('%Y-%m-%d %H:%M')}")
     ax0.grid(True, alpha=0.25)
     ax0.legend(loc="upper left", ncol=3, fontsize=8.5)
 
-    if mostrar_clima_panel:
+    if mostrar_clima:
         ax1 = axes[1]
-        ax1.plot(ventana_df.index, ventana_df["temp"] * 41, color="#EA580C", lw=1.4, label="Temp (°C)")
+        ax1.plot(ventana_df.index, ventana_df["temp"] * 41, color="#EA580C", lw=1.3, label="Temperatura (°C)")
         ax1_hum = ax1.twinx()
         ax1_hum.plot(ventana_df.index, ventana_df["hum"] * 100, color="#0284C7", lw=1.2, linestyle="--", label="Humedad (%)")
         ax1.set_ylabel("Temp (°C)", color="#EA580C")
-        ax1_hum.set_ylabel("Hum (%)", color="#0284C7")
+        ax1_hum.set_ylabel("Humedad (%)", color="#0284C7")
         ax1.grid(True, alpha=0.25)
 
     plt.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
 
-    # Desplegable para auditar exactamente los datos de entrada (Sin Fuga)
-    with st.expander("🔍 Auditar datos disponibles en t y calendario de t+1 (Verificación Anti-Fuga)"):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("**1. Últimas 6 horas observadas hasta $t$:**")
-            cols_show = ["cnt", "temp", "hum", "windspeed", "workingday", "holiday"]
-            st.dataframe(df.iloc[t_idx - 5 : t_idx + 1][cols_show], use_container_width=True)
-        with col_b:
-            st.markdown("**2. Vector de entrada $x_t$ en el paso final de la ventana:**")
-            st.dataframe(S.iloc[[t_idx]].T.rename(columns={ts_sel: "Valor en fila t"}), use_container_width=True)
+    with st.expander("Auditoría de datos en t y verificación anti-fuga"):
+        st.dataframe(df.iloc[t_idx - 5 : t_idx + 1][["cnt", "temp", "hum", "windspeed", "workingday", "holiday"]], use_container_width=True)
 
-# ==============================================================================
-# TAB 2: SIMULADOR WHAT-IF (SENSIBILIDAD CLIMÁTICA Y DE DEMANDA)
-# ==============================================================================
-with tab_simulador:
-    st.subheader("🎛️ Simulador de Sensibilidad Operativa (What-If)")
-    st.markdown(
-        "Partiendo de la ventana histórica seleccionada en **$t$**, ajusta las condiciones del instante actual "
-        "para observar cómo responde el estado oculto $h_L$ de la RNN frente a variaciones climáticas o de inercia."
-    )
+# ------------------------------------------------------------------------------
+# PESTAÑA 2: SIMULADOR
+# ------------------------------------------------------------------------------
+with tab2:
+    st.subheader("Simulación de Sensibilidad Operativa")
+    st.markdown("Modifique las condiciones observadas en el instante $t$ para evaluar la respuesta del estado oculto de la RNN.")
 
-    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-    temp_actual_c = float(df.loc[ts_sel, "temp"] * 41)
-    hum_actual_pct = float(df.loc[ts_sel, "hum"] * 100)
-    wind_actual_kmh = float(df.loc[ts_sel, "windspeed"] * 67)
-    cnt_actual_val = float(df.loc[ts_sel, "cnt"])
+    cs1, cs2, cs3, cs4 = st.columns(4)
+    sim_temp = cs1.slider("Temperatura (°C)", 0.0, 41.0, round(float(df.loc[ts_sel, "temp"] * 41), 1), 0.5)
+    sim_hum = cs2.slider("Humedad (%)", 0.0, 100.0, round(float(df.loc[ts_sel, "hum"] * 100), 0), 1.0)
+    sim_wind = cs3.slider("Viento (km/h)", 0.0, 57.0, round(float(df.loc[ts_sel, "windspeed"] * 67), 1), 1.0)
+    sim_cnt = cs4.slider("Alquileres cnt(t)", 0, 980, int(df.loc[ts_sel, "cnt"]), 5)
 
-    sim_temp = col_s1.slider("Temperatura en t (°C)", 0.0, 41.0, round(temp_actual_c, 1), 0.5)
-    sim_hum = col_s2.slider("Humedad en t (%)", 0.0, 100.0, round(hum_actual_pct, 0), 1.0)
-    sim_wind = col_s3.slider("Viento en t (km/h)", 0.0, 57.0, round(wind_actual_kmh, 1), 1.0)
-    sim_cnt = col_s4.slider("Alquileres actuales cnt(t)", 0, 980, int(cnt_actual_val), 5)
-
-    # Construir ventana modificada en el último paso t
     x_sim = x_win.copy()
     raw_last = np.array([sim_cnt, sim_temp / 41.0, sim_hum / 100.0, sim_wind / 67.0], dtype=np.float64)
     x_sim[-1, :4] = ((raw_last - data_bundle["mean"]) / data_bundle["scale"]).astype(np.float32)
@@ -456,74 +288,37 @@ with tab_simulador:
     delta_sim = pred_sim - pred_rnn
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Pronóstico Base RNN (t+1)", f"{pred_rnn:.0f} bicis")
-    m2.metric("Pronóstico Simulado (t+1)", f"{pred_sim:.0f} bicis", delta=f"{delta_sim:+.1f} bicis vs. base")
+    m1.metric("Pronóstico Base", f"{pred_rnn:.0f} bicis")
+    m2.metric("Pronóstico Simulado", f"{pred_sim:.0f} bicis", f"{delta_sim:+.1f} bicis")
     m3.metric("Variación Relativa", f"{(delta_sim / max(pred_rnn, 1.0)) * 100:+.1f} %")
 
-# ==============================================================================
-# TAB 3: BENCHMARK Y ANÁLISIS DE ERRORES (ETAPAS 14 Y 15)
-# ==============================================================================
-with tab_metricas:
-    st.subheader("📊 Comparación Experimental: RNN vs. Baselines")
+# ------------------------------------------------------------------------------
+# PESTAÑA 3: BENCHMARK
+# ------------------------------------------------------------------------------
+with tab3:
+    st.subheader("Rendimiento Experimental y Comparación de Modelos")
 
     if data_bundle["df_test"] is not None:
-        st.markdown("**1. Resultados Oficiales en Conjunto de Prueba (Test inédito, $n = 2,632$ horas):**")
+        st.markdown("**Resultados Oficiales en el Conjunto de Prueba (Test inédito):**")
         st.dataframe(data_bundle["df_test"].style.format("{:.3f}"), use_container_width=True)
 
-    if data_bundle["df_val"] is not None:
-        st.markdown("**2. Búsqueda de Hiperparámetros en Validación (Rejilla $L \times \text{hidden}$):**")
-        st.dataframe(
-            data_bundle["df_val"].sort_values(["val_MAE", "params"]).style.format(
-                {"val_MAE": "{:.3f}", "val_RMSE": "{:.3f}", "val_MASE": "{:.3f}", "tiempo_s": "{:.1f}"}
-            ),
-            use_container_width=True,
-        )
-
     if data_bundle["df_preds"] is not None:
-        st.markdown("**3. Perfil Horario del Error Absoluto Medio (MAE por hora pronosticada en Test):**")
+        st.markdown("**Error Absoluto Medio (MAE) por Franja Horaria en Test:**")
         df_p = data_bundle["df_preds"]
         hora_idx = df_p.index.hour
-        cols_comp = [c for c in df_p.columns if c != "real" and ("RNN (semilla 42)" in c or "Persistencia" in c or "Prom. misma hora" in c or "Ridge" in c)]
+        cols_comp = [c for c in df_p.columns if c != "real" and ("RNN" in c or "Persistencia" in c or "Misma hora" in c)]
         mae_h = pd.DataFrame({c: np.abs(df_p["real"] - df_p[c]).groupby(hora_idx).mean() for c in cols_comp})
-        mae_h.index.name = "Hora del día (t+1)"
 
-        fig_h, ax_h = plt.subplots(figsize=(11, 3.6))
+        fig_h, ax_h = plt.subplots(figsize=(11, 3.5))
         for col in mae_h.columns:
-            lw = 2.4 if "RNN" in col else 1.4
-            ax_h.plot(mae_h.index, mae_h[col], marker="o", markersize=4, lw=lw, label=col)
-        ax_h.set_xlabel("Hora pronosticada (0–23 h)")
+            lw = 2.2 if "RNN" in col else 1.3
+            ax_h.plot(mae_h.index, mae_h[col], marker="o", markersize=3.5, lw=lw, label=col)
+        ax_h.set_xlabel("Hora pronosticada (0-23 h)")
         ax_h.set_ylabel("MAE (alquileres/hora)")
-        ax_h.set_title("Desempeño por franja horaria en Test: la RNN domina en las horas punta (07–09 h y 17–19 h)")
+        ax_h.set_title("Comparativa de error por hora del día")
         ax_h.set_xticks(range(24))
         ax_h.grid(True, alpha=0.25)
         ax_h.legend()
         plt.tight_layout()
         st.pyplot(fig_h)
         plt.close(fig_h)
-
-# ==============================================================================
-# TAB 4: DOCUMENTACIÓN, GOBIERNO DEL MODELO Y LIMITACIONES
-# ==============================================================================
-with tab_doc:
-    st.subheader("📘 Transparencia, Variables Admitidas y Limitaciones de Uso")
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        st.markdown(
-            """
-            ### ✅ Datos Admitidos y Flujo de Inferencia
-            - **Variables dinámicas observadas hasta $t$:** `cnt`, `temp`, `hum`, `windspeed` (estandarizadas con media y desviación estándar ajustadas **solo en entrenamiento**).
-            - **Variables deterministas de calendario para $t+1$:** Codificación trigonométrica de hora (`hr_sin_t1`, `hr_cos_t1`) y día de semana (`wd_sin_t1`, `wd_cos_t1`), además de `workingday_t1` y `holiday_t1`.
-            - **Variables excluidas por fuga (Data Leakage):** `casual`, `registered` (suman `cnt`) y mediciones meteorológicas futuras de $t+1$.
-            - **Desacoplamiento entrenamiento/despliegue:** El entrenamiento se ejecutó previamente en `BikeSharing.ipynb` y esta interfaz realiza únicamente inferencia sobre el artefacto `rnn_bike_model.pt`.
-            """
-        )
-    with col_d2:
-        st.markdown(
-            """
-            ### ⚠️ Limitaciones y Condiciones Fuera de Distribución
-            1. **Ausencia de pronóstico meteorológico ($t+1$):** Si ocurre una tormenta repentina o fenómeno extremo entre $t$ y $t+1$ (como el huracán Sandy en octubre de 2012), la red proyectará la tendencia previa hasta observar la caída en $cnt$.
-            2. **Agregación a nivel de red:** Predice el total de bicicletas del sistema (`cnt`), no el saldo individual por estación.
-            3. **Desvanecimiento de gradiente:** Al ser una RNN simple con activación `tanh` y ventana óptima $L=24$ h, no captura directamente dependencias semanales largas de 168 h (para lo cual se recomiendan celdas LSTM/GRU).
-            4. **Dominio geográfico:** Entrenado con datos históricos de Washington D.C. (2011–2012); requiere reentrenamiento antes de usarse en otra ciudad.
-            """
-        )
