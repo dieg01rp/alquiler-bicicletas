@@ -184,7 +184,7 @@ with st.sidebar:
 # ==============================================================================
 st.title("Pronóstico Horario de Alquiler de Bicicletas mediante RNN")
 st.markdown(
-    "Modelo predictivo para el horizonte temporal $t+1$ (`cnt`) aplicando validación cronológica estricta "
+    "Modelo predictivo para el horizonte temporal t+1 (`cnt`) aplicando validación cronológica estricta "
     "y control de fuga de información (*UCI Bike Sharing Dataset*, ID 275)."
 )
 
