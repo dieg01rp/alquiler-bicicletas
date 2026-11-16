@@ -174,7 +174,7 @@ with st.sidebar:
         **Especificaciones del Modelo:**
         - Arquitectura: RNN Simple (`tanh`)
         - Capas / Ocultas: {arch['layers']} capa(s) × {arch['hidden']} neuronas
-        - Ventana temporal ($L$): {arch['L']} horas
+        - Ventana temporal (L): {arch['L']} horas
         - Parámetros entrenables: {sum(p.numel() for p in model.parameters()):,}
         """
     )
